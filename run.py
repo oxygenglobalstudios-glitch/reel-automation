@@ -7,7 +7,7 @@ Usage:
   python run.py --render-only   # render into videos/, no git push, no webhook
   python run.py --count 3       # process up to 3 READY rows in one go
 """
-import argparse, csv, io, json, os, subprocess, sys, time, urllib.request
+import argparse, csv, datetime, io, json, os, subprocess, sys, time, urllib.request
 from pathlib import Path
 
 from render_reel import render
@@ -57,6 +57,15 @@ def hours_since_last_video():
     return (time.time() - int(ts)) / 3600 if ts else None
 
 
+def posts_per_hour_now():
+    """Peak (default 18:00-09:00 IST, for US/UK/AU audiences) vs off-peak rate."""
+    ist = datetime.datetime.utcnow() + datetime.timedelta(hours=5, minutes=30)
+    start = CFG.get("peak_start_hour_ist", 18)
+    end = CFG.get("peak_end_hour_ist", 9)
+    peak = ist.hour >= start or ist.hour < end
+    return CFG.get("peak_posts_per_hour", 2) if peak else CFG.get("offpeak_posts_per_hour", 1)
+
+
 def notify_make(payload):
     req = urllib.request.Request(
         CFG["make_webhook_url"], data=json.dumps(payload).encode(),
@@ -72,11 +81,12 @@ def main():
     ap.add_argument("--render-only", action="store_true")
     a = ap.parse_args()
 
-    min_gap = float(CFG.get("min_hours_between_posts", 0))
-    if not a.row and not a.render_only and min_gap:
+    if not a.row and not a.render_only:
+        rate = posts_per_hour_now()
+        gap_h = (60 / rate - 5) / 60      # 2/hr -> 25 min apart, 1/hr -> 55 min apart
         h = hours_since_last_video()
-        if h is not None and h < min_gap:
-            print(f"Last reel was {h:.1f}h ago (< {min_gap}h gap); waiting.")
+        if h is not None and h < gap_h:
+            print(f"Rate {rate}/hour: last reel {h*60:.0f} min ago (< {gap_h*60:.0f} min); waiting.")
             return
     rows = fetch_rows()
     if a.row:

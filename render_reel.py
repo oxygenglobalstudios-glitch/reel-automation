@@ -135,7 +135,7 @@ def render(text: str, out_path: Path, work_dir: Path = ROOT / "build"):
         "-i", str(AUDIO),
         "-filter_complex", fc, "-map", "[v]", "-map", "[a]",
         "-t", str(d), "-r", str(FPS),
-        "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-profile:v", "high",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "24", "-profile:v", "high",
         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
         "-movflags", "+faststart", str(out_path),
     ]
