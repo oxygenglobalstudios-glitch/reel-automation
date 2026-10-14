@@ -13,7 +13,7 @@ from pathlib import Path
 from render_reel import render
 
 ROOT = Path(__file__).parent
-CFG = json.loads((ROOT / "config.json").read_text())
+CFG = json.loads((ROOT / "config.json").read_text(encoding="utf-8-sig"))
 # In GitHub Actions these come from the environment (no secrets in the repo)
 if os.environ.get("MAKE_WEBHOOK_URL"):
     CFG["make_webhook_url"] = os.environ["MAKE_WEBHOOK_URL"]
