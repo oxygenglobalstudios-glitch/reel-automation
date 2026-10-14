@@ -71,7 +71,7 @@ def main():
         todo = [r for r in rows if r["_row"] == a.row]
     else:
         todo = [r for r in rows
-                if r["Status"].strip().upper() == "READY" and not r["Video URL"].strip()]
+                if r["Status"].strip().upper() in ("", "READY") and r["Text"].strip() and not r["Video URL"].strip()]
     todo = todo[: a.count]
     if not todo:
         print("Nothing to do (no READY rows without a Video URL).")
@@ -96,3 +96,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
