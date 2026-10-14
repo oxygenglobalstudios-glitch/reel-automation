@@ -1,0 +1,32 @@
+name: Render and publish reel
+
+on:
+  schedule:
+    - cron: "30 3,9,14 * * *"   # UTC -> 09:00, 15:00, 19:30 IST. Edit freely.
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: reel
+  cancel-in-progress: false
+
+jobs:
+  reel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      - run: |
+          git config user.name "reel-bot"
+          git config user.email "reel-bot@users.noreply.github.com"
+      - name: Render next READY row and hand off to Make
+        env:
+          MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
+        run: python run.py
