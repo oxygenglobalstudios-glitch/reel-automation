@@ -4,5 +4,6 @@
   "github_user": "oxygenglobalstudios-glitch",
   "github_repo": "reel-automation",
   "branch": "main",
-  "make_webhook_url": "PASTE_MAKE_WEBHOOK_URL_HERE"
+  "make_webhook_url": "PASTE_MAKE_WEBHOOK_URL_HERE",
+  "min_hours_between_posts": 3
 }

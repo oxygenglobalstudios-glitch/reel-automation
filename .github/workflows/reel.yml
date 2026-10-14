@@ -2,7 +2,7 @@ name: Render and publish reel
 
 on:
   schedule:
-    - cron: "30 3,9,14 * * *"   # UTC -> 09:00, 15:00, 19:30 IST. Edit freely.
+    - cron: "*/10 * * * *"   # checks the sheet every 10 minutes
   workflow_dispatch: {}
 
 permissions:
@@ -18,6 +18,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

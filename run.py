@@ -7,7 +7,7 @@ Usage:
   python run.py --render-only   # render into videos/, no git push, no webhook
   python run.py --count 3       # process up to 3 READY rows in one go
 """
-import argparse, csv, io, json, os, subprocess, sys, urllib.request
+import argparse, csv, io, json, os, subprocess, sys, time, urllib.request
 from pathlib import Path
 
 from render_reel import render
@@ -51,6 +51,12 @@ def publish(path: Path, no: str):
             f"@{sha}/{rel}")
 
 
+def hours_since_last_video():
+    """Hours since the last reel was committed (None if never)."""
+    ts = git("log", "-1", "--format=%ct", "--", "videos", capture=True)
+    return (time.time() - int(ts)) / 3600 if ts else None
+
+
 def notify_make(payload):
     req = urllib.request.Request(
         CFG["make_webhook_url"], data=json.dumps(payload).encode(),
@@ -66,6 +72,12 @@ def main():
     ap.add_argument("--render-only", action="store_true")
     a = ap.parse_args()
 
+    min_gap = float(CFG.get("min_hours_between_posts", 0))
+    if not a.row and not a.render_only and min_gap:
+        h = hours_since_last_video()
+        if h is not None and h < min_gap:
+            print(f"Last reel was {h:.1f}h ago (< {min_gap}h gap); waiting.")
+            return
     rows = fetch_rows()
     if a.row:
         todo = [r for r in rows if r["_row"] == a.row]
