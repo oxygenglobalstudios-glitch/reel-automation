@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Sheet -> local render -> GitHub -> Make webhook (which writes the sheet + posts to Instagram).
+"""Sheet -> render ahead & store in GitHub -> post at a fixed rate via Make -> Instagram.
+
+Every run does two independent things:
+  1. POST   - if the posting gap has passed, post the next READY row (render it first if needed).
+  2. RENDER - keep a stock of finished videos stored in the repo (render_ahead_target), so posting
+              never waits on rendering. Videos are stored in videos/ and only *posted* at the set rate.
 
 Usage:
-  python run.py                 # render + publish next READY row
-  python run.py --row 5         # a specific sheet row number (2 = first data row)
-  python run.py --render-only   # render into videos/, no git push, no webhook
-  python run.py --count 3       # process up to 3 READY rows in one go
+  python run.py                 # normal automatic run (post if due + render ahead)
+  python run.py --row 5         # post a specific sheet row now (ignores the rate gap)
+  python run.py --render-only   # only render ahead, no push, no posting
 """
 import argparse, csv, datetime, io, json, os, subprocess, sys, time, urllib.request
 from pathlib import Path
@@ -19,6 +23,9 @@ if os.environ.get("MAKE_WEBHOOK_URL"):
     CFG["make_webhook_url"] = os.environ["MAKE_WEBHOOK_URL"]
 if os.environ.get("GITHUB_REPOSITORY"):
     CFG["github_user"], CFG["github_repo"] = os.environ["GITHUB_REPOSITORY"].split("/")
+
+RENDER_AHEAD_TARGET = CFG.get("render_ahead_target", 24)   # finished videos kept in stock
+RENDER_PER_RUN = CFG.get("render_per_run", 12)             # max renders in one run
 
 
 def fetch_rows():
@@ -38,22 +45,21 @@ def git(*args, capture=False):
     return r.stdout.strip() if capture else None
 
 
-def publish(path: Path, no: str):
-    rel = path.relative_to(ROOT).as_posix()
-    git("add", rel)
-    git("commit", "-m", f"reel {no}")
+def push():
     git("pull", "--rebase", "origin", CFG["branch"])
     git("push", "origin", CFG["branch"])
-    sha = git("rev-parse", "HEAD", capture=True)
-    # jsDelivr serves proper video/mp4 + range requests; pinning the commit SHA
-    # makes the URL immutable and available immediately (no branch cache delay)
+
+
+def cdn_url(rel):
+    """Immutable jsDelivr URL pinned to the newest commit that touched the video file."""
+    sha = git("log", "-1", "--format=%H", "--", rel, capture=True)
     return (f"https://cdn.jsdelivr.net/gh/{CFG['github_user']}/{CFG['github_repo']}"
             f"@{sha}/{rel}")
 
 
 def wait_until_live(url, tries=18, pause=10):
-    """Wait until the CDN really serves the video (HTTP 200 + mp4) before Instagram is told to fetch it."""
-    for i in range(tries):
+    """Wait until the CDN really serves the video (HTTP 200/206 + video type) before Instagram fetches it."""
+    for _ in range(tries):
         try:
             req = urllib.request.Request(url, headers={"Range": "bytes=0-1023"})
             with urllib.request.urlopen(req, timeout=30) as r:
@@ -66,20 +72,9 @@ def wait_until_live(url, tries=18, pause=10):
     return False
 
 
-def republish_existing(path: Path, no: str):
-    """Re-post an already-rendered video (e.g. after a FAILED post) without re-rendering."""
-    rel = path.relative_to(ROOT).as_posix()
-    git("commit", "--allow-empty", "-m", f"repost {no}")
-    git("pull", "--rebase", "origin", CFG["branch"])
-    git("push", "origin", CFG["branch"])
-    sha = git("log", "-1", "--format=%H", "--", rel, capture=True)
-    return (f"https://cdn.jsdelivr.net/gh/{CFG['github_user']}/{CFG['github_repo']}"
-            f"@{sha}/{rel}")
-
-
-def hours_since_last_video():
-    """Hours since the last reel was committed or re-posted (None if never)."""
-    ts = git("log", "-1", "--format=%ct", capture=True)
+def hours_since_last_post():
+    """Hours since the last reel was posted (commit messages 'post N' / old 'reel N' / 'repost N')."""
+    ts = git("log", "-1", "--format=%ct", "-E", "--grep=^(post|reel|repost) [0-9]+$", capture=True)
     return (time.time() - int(ts)) / 3600 if ts else None
 
 
@@ -100,51 +95,92 @@ def notify_make(payload):
         return r.read().decode()
 
 
+def video_path(r):
+    no = r["No."].strip() or str(r["_row"])
+    return no, ROOT / "videos" / f"reel_{int(no):03d}.mp4"
+
+
+def pending(rows):
+    """Rows still to post: READY/blank status, text present, no Video URL yet."""
+    return [r for r in rows
+            if r["Status"].strip().upper() in ("", "READY") and r["Text"].strip()
+            and not r["Video URL"].strip()]
+
+
+def post_row(r):
+    no, out = video_path(r)
+    rel = out.relative_to(ROOT).as_posix()
+    if not out.exists():
+        print(f"Rendering row {r['_row']} (No. {no}) ...")
+        render(r["Text"], out)
+        git("add", rel)
+        git("commit", "-m", f"render {no}")
+    git("commit", "--allow-empty", "-m", f"post {no}")      # marks the posting time for the rate gap
+    push()
+    url = cdn_url(rel)
+    print("Video ->", url)
+    print("CDN live:", wait_until_live(url))
+    print("Make:", notify_make({
+        "row": r["_row"], "no": no, "video_url": url, "caption": r["Caption"]}))
+
+
+def render_ahead(rows, skip_row=None):
+    """Render + store videos for upcoming rows so a stock of finished videos is always ready."""
+    todo = [r for r in pending(rows) if r["_row"] != skip_row]
+    stock = sum(1 for r in todo if video_path(r)[1].exists())
+    made = []
+    for r in todo:
+        if stock >= RENDER_AHEAD_TARGET or len(made) >= RENDER_PER_RUN:
+            break
+        no, out = video_path(r)
+        if out.exists():
+            continue
+        print(f"Render ahead: row {r['_row']} (No. {no})")
+        render(r["Text"], out)
+        git("add", out.relative_to(ROOT).as_posix())
+        made.append(no)
+        stock += 1
+    if made:
+        git("commit", "-m", "render " + ",".join(made))
+        return True
+    return False
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--row", type=int)
-    ap.add_argument("--count", type=int, default=1)
     ap.add_argument("--render-only", action="store_true")
     a = ap.parse_args()
 
-    if not a.row and not a.render_only:
-        rate = posts_per_hour_now()
-        gap_h = (60 / rate - 5) / 60      # 2/hr -> 25 min apart, 1/hr -> 55 min apart
-        h = hours_since_last_video()
-        if h is not None and h < gap_h:
-            print(f"Rate {rate}/hour: last reel {h*60:.0f} min ago (< {gap_h*60:.0f} min); waiting.")
-            return
     rows = fetch_rows()
+    posted_row = None
+
+    if a.render_only:
+        render_ahead(rows)
+        return
+
     if a.row:
         todo = [r for r in rows if r["_row"] == a.row]
     else:
-        todo = [r for r in rows
-                if r["Status"].strip().upper() in ("", "READY") and r["Text"].strip() and not r["Video URL"].strip()]
-    todo = todo[: a.count]
-    if not todo:
-        print("Nothing to do (no READY rows without a Video URL).")
-        return
-
-    for r in todo:
-        no = r["No."].strip() or str(r["_row"])
-        out = ROOT / "videos" / f"reel_{int(no):03d}.mp4"
-        if out.exists() and not a.row and not a.render_only:
-            # Row is READY with no Video URL but already rendered: it was FAILED/re-queued -> re-post it
-            print(f"Row {r['_row']} already rendered ({out.name}); re-posting it.")
-            url = republish_existing(out, no)
+        rate = posts_per_hour_now()
+        gap_h = (60 / rate - 5) / 60          # 1/hr -> 55 min apart, 2/hr -> 25 min apart
+        h = hours_since_last_post()
+        if h is not None and h < gap_h:
+            print(f"Rate {rate}/hour: last post {h*60:.0f} min ago (< {gap_h*60:.0f} min); not posting now.")
+            todo = []
         else:
-            print(f"Rendering row {r['_row']} (No. {no}) ...")
-            render(r["Text"], out)
-            if a.render_only:
-                print("Saved", out)
-                continue
-            url = publish(out, no)
-        print("Pushed ->", url)
-        print("CDN live:", wait_until_live(url))
-        print("Make:", notify_make({
-            "row": r["_row"], "no": no, "video_url": url, "caption": r["Caption"]}))
+            todo = pending(rows)[:1]
+
+    if todo:
+        post_row(todo[0])
+        posted_row = todo[0]["_row"]
+    elif not a.row:
+        print("Nothing to post right now.")
+
+    if render_ahead(rows, skip_row=posted_row):
+        push()
+        print("Stored new rendered videos in the repo.")
 
 
 if __name__ == "__main__":
     sys.exit(main())
-
