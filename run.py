@@ -51,9 +51,35 @@ def publish(path: Path, no: str):
             f"@{sha}/{rel}")
 
 
+def wait_until_live(url, tries=18, pause=10):
+    """Wait until the CDN really serves the video (HTTP 200 + mp4) before Instagram is told to fetch it."""
+    for i in range(tries):
+        try:
+            req = urllib.request.Request(url, headers={"Range": "bytes=0-1023"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                if r.status in (200, 206) and "video" in (r.headers.get("Content-Type") or ""):
+                    time.sleep(15)      # small extra margin for CDN edges
+                    return True
+        except Exception as e:
+            print("CDN not ready yet:", e)
+        time.sleep(pause)
+    return False
+
+
+def republish_existing(path: Path, no: str):
+    """Re-post an already-rendered video (e.g. after a FAILED post) without re-rendering."""
+    rel = path.relative_to(ROOT).as_posix()
+    git("commit", "--allow-empty", "-m", f"repost {no}")
+    git("pull", "--rebase", "origin", CFG["branch"])
+    git("push", "origin", CFG["branch"])
+    sha = git("log", "-1", "--format=%H", "--", rel, capture=True)
+    return (f"https://cdn.jsdelivr.net/gh/{CFG['github_user']}/{CFG['github_repo']}"
+            f"@{sha}/{rel}")
+
+
 def hours_since_last_video():
-    """Hours since the last reel was committed (None if never)."""
-    ts = git("log", "-1", "--format=%ct", "--", "videos", capture=True)
+    """Hours since the last reel was committed or re-posted (None if never)."""
+    ts = git("log", "-1", "--format=%ct", capture=True)
     return (time.time() - int(ts)) / 3600 if ts else None
 
 
@@ -102,16 +128,19 @@ def main():
     for r in todo:
         no = r["No."].strip() or str(r["_row"])
         out = ROOT / "videos" / f"reel_{int(no):03d}.mp4"
-        if out.exists() and not a.row:
-            print(f"Row {r['_row']} already rendered ({out.name}); skipping to avoid a duplicate post.")
-            continue
-        print(f"Rendering row {r['_row']} (No. {no}) ...")
-        render(r["Text"], out)
-        if a.render_only:
-            print("Saved", out)
-            continue
-        url = publish(out, no)
+        if out.exists() and not a.row and not a.render_only:
+            # Row is READY with no Video URL but already rendered: it was FAILED/re-queued -> re-post it
+            print(f"Row {r['_row']} already rendered ({out.name}); re-posting it.")
+            url = republish_existing(out, no)
+        else:
+            print(f"Rendering row {r['_row']} (No. {no}) ...")
+            render(r["Text"], out)
+            if a.render_only:
+                print("Saved", out)
+                continue
+            url = publish(out, no)
         print("Pushed ->", url)
+        print("CDN live:", wait_until_live(url))
         print("Make:", notify_make({
             "row": r["_row"], "no": no, "video_url": url, "caption": r["Caption"]}))
 

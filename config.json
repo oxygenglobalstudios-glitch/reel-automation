@@ -7,6 +7,6 @@
   "make_webhook_url": "PASTE_MAKE_WEBHOOK_URL_HERE",
   "peak_start_hour_ist": 18,
   "peak_end_hour_ist": 9,
-  "peak_posts_per_hour": 2,
+  "peak_posts_per_hour": 1,
   "offpeak_posts_per_hour": 1
 }
